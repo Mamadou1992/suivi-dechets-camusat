@@ -643,16 +643,60 @@ if df.empty:
         st.success("Connexion a KoboToolbox etablie.")
         st.info(
             "Le formulaire ne contient encore aucune soumission. Les indicateurs "
-            "apparaitront des la premiere collecte enregistree dans KoboCollect.\n\n"
-            "Verifier au passage que le formulaire selectionne est bien le bon "
-            "(menu de gauche) et qu'il est **deploye** dans Kobo."
+            "se rempliront des la premiere collecte enregistree dans KoboCollect."
         )
     else:
         st.info(
-            "Aucune donnee disponible.\n\n"
-            "- Renseigner le token et l'UID du formulaire (menu de gauche ou secrets).\n"
-            "- Ou deposer les fiches de collecte Excel dans le dossier `donnees/`."
+            "Aucune source de donnees active.\n\n"
+            "- Renseigner le token et l'UID du formulaire (secrets ou parametres avances).\n"
+            "- Ou reactiver l'historique de reference dans le menu de gauche."
         )
+
+    # Le tableau de bord reste visible : chaque bloc annonce ce qu'il affichera.
+    z1, z2, z3, z4, z5 = st.columns(5)
+    for col, libelle in zip((z1, z2, z3, z4, z5),
+                            ("Tonnage total", "Valorisable", "Part valorisable",
+                             "Bacs collectes", "Collectes enregistrees")):
+        col.metric(libelle, "-")
+
+    apercu = st.tabs(["Vue d'ensemble", "Evolution", "Stock tampon",
+                      "Comparaison sites", "Fiches de collecte", "Tracabilite",
+                      "Intervenants", "Donnees & export"])
+    contenus = [
+        ("Repartition par flux",
+         "Part des plastiques, cartons et autres dechets dans le tonnage collecte, "
+         "tonnage par destination et par passage.",
+         "Alimente par : nombre de bacs et poids de chaque flux"),
+        ("Evolution mensuelle et hebdomadaire",
+         "Tonnage par mois et par flux, part valorisable, profil des semaines 1 a 5.",
+         "Alimente par : date de collecte et poids"),
+        ("Stock au site tampon",
+         "Cumul des entrees au site tampon diminue des levees, avec seuil d'alerte "
+         "declenchant la levee mensuelle.",
+         "Alimente par : destination des dechets et levee mensuelle"),
+        ("Comparaison entre sites",
+         "Classement des sites par tonnage, croisement site par mois, moyennes par "
+         "collecte.",
+         "Alimente par : site de collecte"),
+        ("Fiches de collecte",
+         "Detail de chaque passage : interlocuteurs, quantites, photos des dechets et "
+         "du bon de pesee, position GPS, signature du client, observations.",
+         "Alimente par : l'ensemble du questionnaire Kobo"),
+        ("Tracabilite documentaire",
+         "Bons de pesee, levees mensuelles, certificats de traitement obtenus et "
+         "manquants, completude de la saisie champ par champ.",
+         "Alimente par : n° de bon, levee mensuelle, n° de certificat"),
+        ("Intervenants",
+         "Responsables SONAGED et contacts Camusat, nombre de collectes par agent, "
+         "regularite des passages.",
+         "Alimente par : responsable SONAGED et contact chez le client"),
+        ("Donnees et export",
+         "Table detaillee de toutes les collectes, export Excel multi-onglets et CSV.",
+         "Alimente par : toutes les collectes enregistrees"),
+    ]
+    for onglet, (titre, description, exemple) in zip(apercu, contenus):
+        with onglet:
+            bloc_attente(titre, description, exemple)
     st.stop()
 
 # --------------------------------------------------------------------------- #
