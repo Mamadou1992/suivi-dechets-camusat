@@ -698,7 +698,10 @@ k = kpis(dfa)
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Tonnage total", f"{k['total']/1000:,.2f} t".replace(",", " "))
 m2.metric("Valorisable (plastiques + cartons)", f"{k['valorisable']/1000:,.2f} t".replace(",", " "))
-m3.metric("Taux de valorisation", f"{k['taux']:.1f} %")
+m3.metric("Part valorisable", f"{k['taux']:.1f} %",
+          help="Plastiques + cartons rapportes au tonnage total collecte. Ce ratio "
+               "mesure la qualite du tri, pas le devenir reel des dechets : la "
+               "valorisation effective est suivie dans l'onglet Tracabilite.")
 m4.metric("Bacs collectes", f"{k['bacs']:,.0f}".replace(",", " "))
 m5.metric("Collectes enregistrees", k["collectes"])
 
@@ -765,7 +768,7 @@ with onglets[1]:
     e1.plotly_chart(fige, width="stretch")
 
     figt = px.line(evo, x="mois", y="taux", markers=True,
-                   title="Taux de valorisation (%)", labels={"mois": "", "taux": "%"})
+                   title="Part valorisable (%)", labels={"mois": "", "taux": "%"})
     figt.update_traces(line_color=VERT)
     figt.update_yaxes(range=[0, 100])
     e2.plotly_chart(figt, width="stretch")
@@ -782,8 +785,8 @@ with onglets[1]:
     st.subheader("Detail mensuel")
     tab = evo.rename(columns={"mois": "Mois", "total_poids": "Total (kg)",
                               "poids_valorisable": "Valorisable (kg)",
-                              "total_bacs": "Bacs", "taux": "Taux (%)"})
-    tab = tab.round({"Total (kg)": 2, "Valorisable (kg)": 2, "Taux (%)": 1})
+                              "total_bacs": "Bacs", "taux": "Part valorisable (%)"})
+    tab = tab.round({"Total (kg)": 2, "Valorisable (kg)": 2, "Part valorisable (%)": 1})
     st.dataframe(tab, width="stretch", hide_index=True)
 
 # --------------------------------------------------------------------------- #
@@ -852,7 +855,7 @@ with onglets[3]:
 
     st.dataframe(par_site.rename(columns={
         "site": "Site", "total": "Total (kg)", "valorisable": "Valorisable (kg)",
-        "bacs": "Bacs", "collectes": "Collectes", "taux": "Taux (%)",
+        "bacs": "Bacs", "collectes": "Collectes", "taux": "Part valorisable (%)",
         "moyenne_par_collecte": "Moyenne / collecte (kg)"}),
         width="stretch", hide_index=True)
 
@@ -951,9 +954,24 @@ with onglets[5]:
     st.caption("Suivi documentaire : bons de pesee, levees mensuelles et certificats "
                "de traitement delivres par le repreneur.")
 
-    t1, t2, t3, t4 = st.columns(4)
     levees = dfa[dfa["levee_mensuelle"].astype(bool)]
     sans_certificat = int((levees["num_certificat"].astype(str).str.strip() == "").sum())
+    certifiees = levees[levees["num_certificat"].astype(str).str.strip() != ""]
+    poids_certifie = float(certifiees["poids_valorisable"].sum())
+    taux_reel = (poids_certifie / k["total"] * 100) if k["total"] else 0.0
+
+    v1, v2 = st.columns(2)
+    v1.metric("Part valorisable (au tri)", f"{k['taux']:.1f} %",
+              help="Plastiques + cartons rapportes au tonnage collecte.")
+    v2.metric("Valorisation certifiee", f"{taux_reel:.1f} %",
+              help="Quantites effectivement remises au repreneur et couvertes par un "
+                   "certificat de traitement, rapportees au tonnage collecte.")
+    if taux_reel == 0:
+        st.caption("Aucune levee certifiee a ce jour : la valorisation certifiee reste "
+                   "a 0 % tant qu'un certificat de traitement n'a pas ete enregistre.")
+    st.divider()
+
+    t1, t2, t3, t4 = st.columns(4)
     t1.metric("Collectes tracees", f"{taux_completude(dfa, 'num_bon'):.0f} %",
               help="Part des collectes avec un numero de bon de pesee")
     t2.metric("Levees mensuelles", len(levees))
