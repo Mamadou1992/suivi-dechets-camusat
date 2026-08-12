@@ -199,7 +199,7 @@ def normaliser_fiche_excel(chemin) -> pd.DataFrame:
             "date_collecte": info.get("date_collecte"),
             "semaine": info.get("semaine", ""),
             "client": "CAMUSAT",
-            "site": str(info.get("site", "CAMUSAT")),
+            "site": _normaliser_site(str(info.get("site", "CAMUSAT"))),
             "responsable_sonaged": str(info.get("responsable_sonaged", "")),
             "contact_client": str(info.get("contact_client", "")),
             "tel_contact": "", "site_tampon_nom": "", "num_bon": "",
@@ -219,6 +219,16 @@ def derive_semaine(dates: pd.Series) -> pd.Series:
     d = pd.to_datetime(dates, errors="coerce")
     num = ((d.dt.day - 1) // 7 + 1).clip(upper=5)
     return num.apply(lambda n: f"Semaine {int(n)}" if pd.notna(n) else "")
+
+
+def _normaliser_site(libelle: str) -> str:
+    """Aligne les libelles de site issus des fiches Excel sur ceux du formulaire."""
+    ref = _sans_accents(libelle).strip().lower()
+    if ref in ("camusat", "camusat thies", "thies", ""):
+        return "Camusat Thies"
+    if ref in ("camusat dakar", "dakar"):
+        return "Camusat Dakar"
+    return libelle.strip()
 
 
 def _sans_accents(txt: str) -> str:
@@ -421,6 +431,38 @@ def charger_fichiers_locaux() -> pd.DataFrame:
     return pd.concat(blocs, ignore_index=True) if blocs else pd.DataFrame(columns=COLONNES)
 
 
+# Historique de reference integre au code : fiche de collecte CAMUSAT de mars 2026.
+# Permet d'afficher des indicateurs avant l'arrivee des premieres soumissions Kobo,
+# sans publier de fichier de donnees sur le depot.
+HISTORIQUE_REFERENCE = [
+    # date,       bacs et poids : plastiques, cartons, autres
+    ("2026-03-04", 5, 68.44, 2, 28.50, 1, 48.81),
+    ("2026-03-09", 6, 97.38, 4, 68.11, 1, 17.06),
+    ("2026-03-18", 6, 185.46, 4, 43.75, 1, 55.90),
+    ("2026-03-25", 6, 53.75, 1, 14.32, 1, 46.75),
+]
+
+
+@st.cache_data
+def charger_historique_reference() -> pd.DataFrame:
+    """Reconstitue les collectes de mars 2026 (source : fiche de collecte CAMUSAT)."""
+    lignes = []
+    for d, bp, pp, bc, pc, ba, pa in HISTORIQUE_REFERENCE:
+        lignes.append({
+            "date_collecte": pd.Timestamp(d),
+            "client": "CAMUSAT", "site": "Camusat Thies",
+            "responsable_sonaged": "Fatoumata DEME",
+            "contact_client": "Bassirou Gning", "tel_contact": "77 605 56 93",
+            "bacs_plastiques": bp, "poids_plastiques": pp,
+            "bacs_cartons": bc, "poids_cartons": pc,
+            "bacs_autres": ba, "poids_autres": pa,
+            "destination_dechets": "Non precise", "site_tampon_nom": "",
+            "num_bon": "", "levee_mensuelle": False, "num_certificat": "",
+            "observations": "", "source": "Historique mars 2026",
+        })
+    return _finaliser(pd.DataFrame(lignes))
+
+
 cfg = get_config()
 
 with st.sidebar:
@@ -444,7 +486,13 @@ with st.sidebar:
             st.error(f"Connexion impossible : {exc}")
     uid = st.text_input("UID du formulaire", value=uid)
 
-    inclure_historique = st.checkbox("Inclure les fiches Excel historiques", value=True)
+    st.divider()
+    st.caption("Sources complementaires")
+    inclure_historique = st.checkbox("Fiches Excel du dossier donnees/", value=True)
+    inclure_reference = st.checkbox(
+        "Historique de reference (mars 2026)", value=True,
+        help="Collectes de mars 2026 integrees a l'application. Permet de visualiser "
+             "les indicateurs avant les premieres saisies Kobo.")
     if st.button("Actualiser les donnees", width="stretch"):
         st.cache_data.clear()
         st.rerun()
@@ -462,13 +510,23 @@ if token and uid:
         erreur_kobo = str(exc)
 if inclure_historique:
     blocs.append(charger_fichiers_locaux())
+if inclure_reference:
+    blocs.append(charger_historique_reference())
 
 blocs_valides = [b for b in blocs if b is not None and not b.empty]
 if blocs_valides:
-    df = (pd.concat(blocs_valides, ignore_index=True)
-          .sort_values("date_collecte").reset_index(drop=True))
+    df = pd.concat(blocs_valides, ignore_index=True)
+    # une meme collecte peut venir d'une fiche Excel et de l'historique integre :
+    # la version Kobo (ou la premiere source listee) est conservee
+    df["_cle"] = df["total_poids"].round(2)
+    df = (df.drop_duplicates(subset=["date_collecte", "_cle"], keep="first")
+            .drop(columns="_cle")
+            .sort_values("date_collecte").reset_index(drop=True))
 else:
     df = pd.DataFrame(columns=COLONNES)
+
+sources_actives = sorted(df["source"].dropna().unique()) if not df.empty else []
+attente_kobo = "Kobo" not in sources_actives
 
 entete = st.columns([1, 9])
 if LOGO:
@@ -477,6 +535,12 @@ entete[1].title("Suivi des dechets tries - CAMUSAT / SONAGED")
 
 if erreur_kobo:
     st.warning(f"Kobo : {erreur_kobo}")
+if attente_kobo and not df.empty:
+    st.info(
+        "**En attente des premieres saisies Kobo.** Les indicateurs ci-dessous "
+        "reposent sur l'historique de reference (mars 2026). Ils seront remplaces "
+        "automatiquement par les donnees du formulaire des la premiere soumission.",
+        icon=":material/hourglass_top:")
 if df.empty:
     if token and uid and not erreur_kobo:
         st.success("Connexion a KoboToolbox etablie.")
@@ -540,6 +604,40 @@ m2.metric("Valorisable (plastiques + cartons)", f"{k['valorisable']/1000:,.2f} t
 m3.metric("Taux de valorisation", f"{k['taux']:.1f} %")
 m4.metric("Bacs collectes", f"{k['bacs']:,.0f}".replace(",", " "))
 m5.metric("Collectes enregistrees", k["collectes"])
+
+# --- Etat du dispositif : indicateurs de pilotage, utiles des le demarrage ---
+with st.expander("Etat du dispositif", expanded=attente_kobo):
+    derniere = pd.to_datetime(dfa["date_collecte"]).max()
+    anciennete = (pd.Timestamp(date.today()) - derniere).days
+    prochaine_levee = (derniere + pd.offsets.MonthEnd(0)).date()
+    certificats_manquants = int(
+        (dfa["levee_mensuelle"].astype(bool)
+         & dfa["num_certificat"].astype(str).str.strip().eq("")).sum())
+    tracabilite = dfa["num_bon"].astype(str).str.strip().ne("").mean() * 100
+
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric("Derniere collecte", derniere.strftime("%d/%m/%Y"),
+              delta=f"il y a {anciennete} j", delta_color="off")
+    e2.metric("Moyenne par collecte", f"{k['total'] / max(k['collectes'], 1):.0f} kg")
+    e3.metric("Bons de pesee renseignes", f"{tracabilite:.0f} %")
+    e4.metric("Certificats manquants", certificats_manquants,
+              delta="a reclamer" if certificats_manquants else "a jour",
+              delta_color="inverse" if certificats_manquants else "normal")
+
+    st.caption(
+        f"Sources actives : {', '.join(sources_actives) or 'aucune'} · "
+        f"Periode couverte : du {pd.to_datetime(dfa['date_collecte']).min():%d/%m/%Y} "
+        f"au {derniere:%d/%m/%Y} · "
+        f"Fin de mois de la derniere collecte : {prochaine_levee:%d/%m/%Y}")
+
+    if attente_kobo:
+        st.markdown(
+            "**Points a lever pour passer en suivi reel :**\n"
+            "1. Designer le referent collecte cote Camusat et cote SONAGED.\n"
+            "2. Deployer le formulaire Kobo et installer KoboCollect sur les telephones.\n"
+            "3. Arreter le site tampon de stockage et son seuil de remplissage.\n"
+            "4. Faire renseigner le n° de bon de pesee a chaque passage.\n"
+            "5. Reclamer le certificat de traitement apres chaque levee mensuelle.")
 
 onglets = st.tabs(["Vue d'ensemble", "Evolution", "Stock tampon",
                    "Comparaison sites", "Donnees & export"])
