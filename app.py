@@ -15,6 +15,7 @@ Documentation : README.md et DEPLOIEMENT.md
 """
 from __future__ import annotations
 
+import base64
 import io
 import os
 import re
@@ -401,19 +402,119 @@ def _trouver_logo() -> str | None:
 
 LOGO = _trouver_logo()
 
+
+def _logo_base64() -> str:
+    if not LOGO:
+        return ""
+    try:
+        return base64.b64encode(Path(LOGO).read_bytes()).decode()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+LOGO_B64 = _logo_base64()
+
 st.set_page_config(page_title="Suivi dechets CAMUSAT / SONAGED",
                    page_icon=LOGO or "♻️", layout="wide")
 
-VERT = "#1F6F43"
-PALETTE = {"Plastiques": "#2E86C1", "Cartons": "#CA6F1E", "Autres": "#7D8A95"}
+# --- Charte graphique SONAGED ---
+VERT = "#1F6F43"          # vert principal du logo
+VERT_CLAIR = "#8CC63F"    # vert des feuilles
+VERT_PALE = "#EFF5F0"     # fonds
+ENCRE = "#1B2B22"         # texte
+GRIS = "#6B7B72"          # texte secondaire
+BORDURE = "#DCE6DF"
+PALETTE = {"Plastiques": "#2E86C1", "Cartons": "#CA6F1E", "Autres": "#8A9A91"}
+POLICE = ("system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', "
+          "Arial, sans-serif")
 
 st.markdown(f"""
 <style>
-  .block-container {{padding-top: 2rem;}}
-  h1, h2, h3 {{color: {VERT};}}
-  div[data-testid="stMetricValue"] {{font-size: 1.6rem;}}
+  .block-container {{padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1500px;}}
+  h1, h2, h3 {{color: {VERT}; letter-spacing: -0.01em;}}
+  h1 {{font-size: 1.9rem; font-weight: 700;}}
+  h2 {{font-size: 1.25rem; margin-top: 0.6rem;}}
+  h3 {{font-size: 1.05rem; color: {ENCRE};}}
+
+  /* Bandeau d'en-tete */
+  .bandeau {{
+      background: linear-gradient(100deg, {VERT} 0%, #2C8A57 55%, {VERT_CLAIR} 160%);
+      color: #FFFFFF; border-radius: 14px; padding: 1.1rem 1.4rem;
+      display: flex; align-items: center; gap: 1.1rem; margin-bottom: 1.1rem;
+  }}
+  .bandeau h1 {{color: #FFFFFF; margin: 0; font-size: 1.55rem;}}
+  .bandeau p {{margin: .15rem 0 0; opacity: .88; font-size: .86rem;}}
+
+  /* Indicateurs en cartes */
+  div[data-testid="stMetric"] {{
+      background: #FFFFFF; border: 1px solid {BORDURE}; border-radius: 12px;
+      padding: .85rem 1rem; box-shadow: 0 1px 2px rgba(27,43,34,.05);
+  }}
+  div[data-testid="stMetric"]:hover {{border-color: {VERT_CLAIR};}}
+  div[data-testid="stMetricLabel"] p {{
+      font-size: .76rem; color: {GRIS}; text-transform: uppercase;
+      letter-spacing: .04em; font-weight: 600;
+  }}
+  div[data-testid="stMetricValue"] {{
+      font-size: 1.55rem; font-weight: 700; color: {ENCRE};
+  }}
+  div[data-testid="stMetricDelta"] {{font-size: .78rem;}}
+
+  /* Onglets */
+  .stTabs [data-baseweb="tab-list"] {{
+      gap: .15rem; border-bottom: 1px solid {BORDURE};
+  }}
+  .stTabs [data-baseweb="tab"] {{
+      padding: .55rem .95rem; border-radius: 8px 8px 0 0;
+      font-size: .9rem; font-weight: 500; color: {GRIS};
+  }}
+  .stTabs [aria-selected="true"] {{
+      background: {VERT_PALE}; color: {VERT} !important; font-weight: 600;
+  }}
+
+  /* Conteneurs encadres (blocs en attente) */
+  div[data-testid="stVerticalBlockBorderWrapper"] {{border-radius: 12px;}}
+
+  /* Barre laterale */
+  section[data-testid="stSidebar"] {{background: {VERT_PALE};}}
+  section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {{
+      color: {VERT}; font-size: .95rem;
+  }}
+
+  /* Boutons */
+  .stButton button {{border-radius: 8px; font-weight: 500;}}
+
+  /* Tableaux */
+  div[data-testid="stDataFrame"] {{border-radius: 10px;}}
+
+  /* Pied de page */
+  .pied {{
+      border-top: 1px solid {BORDURE}; margin-top: 2.2rem; padding-top: .9rem;
+      color: {GRIS}; font-size: .78rem;
+  }}
 </style>
 """, unsafe_allow_html=True)
+
+MODELE_GRAPHIQUE = dict(
+    font=dict(family=POLICE, size=12, color=ENCRE),
+    title=dict(font=dict(size=14, color=VERT), x=0, xanchor="left"),
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    margin=dict(t=48, b=40, l=10, r=10),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
+                title_text="", font=dict(size=11)),
+    hoverlabel=dict(font_size=12, font_family=POLICE),
+    colorway=[VERT, VERT_CLAIR, "#2E86C1", "#CA6F1E", "#8A9A91"],
+)
+
+
+def styliser(fig, hauteur: int = 340):
+    """Applique la charte graphique a une figure Plotly."""
+    fig.update_layout(height=hauteur, **MODELE_GRAPHIQUE)
+    fig.update_xaxes(showgrid=False, linecolor=BORDURE, ticks="outside",
+                     tickcolor=BORDURE, title_font_size=11)
+    fig.update_yaxes(gridcolor=BORDURE, zeroline=False, title_font_size=11)
+    return fig
 
 
 # --------------------------------------------------------------------------- #
@@ -433,12 +534,17 @@ def controle_acces() -> None:
         return
 
     attendu = _mot_de_passe_attendu()
-    gauche, centre, droite = st.columns([1, 2, 1])
+    gauche, centre, droite = st.columns([1, 1.5, 1])
     with centre:
+        st.markdown("<div style='height:6vh'></div>", unsafe_allow_html=True)
         if LOGO:
-            st.image(LOGO, width=170)
-        st.title("Suivi des dechets tries")
-        st.caption("CAMUSAT / SONAGED - acces reserve aux equipes autorisees.")
+            l1, l2, l3 = st.columns([1, 2, 1])
+            l2.image(LOGO, width="stretch")
+        st.markdown(
+            f"<h1 style='text-align:center;margin-bottom:.1rem'>Suivi des dechets tries</h1>"
+            f"<p style='text-align:center;color:{GRIS};font-size:.9rem;margin-top:0'>"
+            "CAMUSAT / SONAGED &nbsp;·&nbsp; acces reserve aux equipes autorisees</p>",
+            unsafe_allow_html=True)
 
         if not attendu:
             st.error(
@@ -625,10 +731,16 @@ else:
 sources_actives = sorted(df["source"].dropna().unique()) if not df.empty else []
 attente_kobo = "Kobo" not in sources_actives
 
-entete = st.columns([1, 9])
-if LOGO:
-    entete[0].image(LOGO, width=80)
-entete[1].title("Suivi des dechets tries - CAMUSAT / SONAGED")
+st.markdown(f"""
+<div class="bandeau">
+  {f'<img src="data:image/jpeg;base64,{LOGO_B64}" width="58" '
+   'style="border-radius:10px;background:#fff;padding:5px;">' if LOGO_B64 else ''}
+  <div>
+    <h1>Suivi des dechets tries</h1>
+    <p>CAMUSAT / SONAGED &nbsp;·&nbsp; collecte, stockage tampon et valorisation</p>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
 if erreur_kobo:
     st.warning(f"Kobo : {erreur_kobo}")
@@ -786,20 +898,20 @@ with onglets[0]:
                  color="flux", color_discrete_map=PALETTE,
                  title="Repartition du tonnage par flux")
     fig.update_traces(texttemplate="%{label}<br>%{value:.0f} kg (%{percent})")
-    g1.plotly_chart(fig, width="stretch")
+    g1.plotly_chart(styliser(fig), width="stretch")
 
     par_dest = dfa.groupby("destination_dechets", as_index=False)["total_poids"].sum()
     fig2 = px.bar(par_dest, x="destination_dechets", y="total_poids",
                   title="Tonnage par destination", labels={"destination_dechets": "",
                                                            "total_poids": "kg"})
     fig2.update_traces(marker_color=VERT)
-    g2.plotly_chart(fig2, width="stretch")
+    g2.plotly_chart(styliser(fig2), width="stretch")
 
     hebdo = long.groupby(["date_collecte", "flux"], as_index=False)["poids"].sum()
     fig3 = px.bar(hebdo, x="date_collecte", y="poids", color="flux",
                   color_discrete_map=PALETTE, barmode="stack",
                   title="Tonnage par collecte", labels={"date_collecte": "", "poids": "kg"})
-    st.plotly_chart(fig3, width="stretch")
+    st.plotly_chart(styliser(fig3, hauteur=380), width="stretch")
 
 # --------------------------------------------------------------------------- #
 with onglets[1]:
@@ -809,13 +921,13 @@ with onglets[1]:
     fige = px.bar(mensuel, x="mois", y="poids", color="flux", barmode="group",
                   color_discrete_map=PALETTE, title="Tonnage mensuel par flux",
                   labels={"mois": "", "poids": "kg"})
-    e1.plotly_chart(fige, width="stretch")
+    e1.plotly_chart(styliser(fige), width="stretch")
 
     figt = px.line(evo, x="mois", y="taux", markers=True,
                    title="Part valorisable (%)", labels={"mois": "", "taux": "%"})
     figt.update_traces(line_color=VERT)
     figt.update_yaxes(range=[0, 100])
-    e2.plotly_chart(figt, width="stretch")
+    e2.plotly_chart(styliser(figt), width="stretch")
 
     st.subheader("Profil hebdomadaire")
     hebdo = (long.groupby(["semaine", "flux"], as_index=False)["poids"].sum()
@@ -824,7 +936,7 @@ with onglets[1]:
                   color_discrete_map=PALETTE,
                   title="Tonnage cumule par semaine du mois",
                   labels={"semaine": "", "poids": "kg"})
-    st.plotly_chart(figs, width="stretch")
+    st.plotly_chart(styliser(figs), width="stretch")
 
     st.subheader("Detail mensuel")
     tab = evo.rename(columns={"mois": "Mois", "total_poids": "Total (kg)",
@@ -848,7 +960,7 @@ with onglets[2]:
                        labels={"date_collecte": "", "stock": "kg"})
         figs.add_hline(y=seuil, line_dash="dash", line_color="#C0392B",
                        annotation_text="Seuil d'alerte")
-        st.plotly_chart(figs, width="stretch")
+        st.plotly_chart(styliser(figs), width="stretch")
 
         dernier = stock.groupby("site").tail(1)
         cols = st.columns(max(len(dernier), 1))
@@ -889,13 +1001,13 @@ with onglets[3]:
                   title="Tonnage total par site", labels={"site": "", "total": "kg"},
                   text_auto=".0f")
     figc.update_traces(marker_color=VERT)
-    st.plotly_chart(figc, width="stretch")
+    st.plotly_chart(styliser(figc), width="stretch")
 
     figh = px.density_heatmap(long, x="mois", y="site", z="poids", histfunc="sum",
                               color_continuous_scale="Greens",
                               title="Tonnage par site et par mois (kg)",
                               labels={"mois": "", "site": ""})
-    st.plotly_chart(figh, width="stretch")
+    st.plotly_chart(styliser(figh), width="stretch")
 
     st.dataframe(par_site.rename(columns={
         "site": "Site", "total": "Total (kg)", "valorisable": "Valorisable (kg)",
@@ -947,8 +1059,8 @@ with onglets[4]:
     q1.dataframe(detail, hide_index=True, width="stretch")
     figf = px.bar(detail, x="Flux", y="Poids (kg)", color="Flux",
                   color_discrete_map=PALETTE, text_auto=".1f")
-    figf.update_layout(showlegend=False, height=260, margin=dict(t=10, b=10))
-    q2.plotly_chart(figf, width="stretch")
+    q2.plotly_chart(styliser(figf, hauteur=260), width="stretch")
+    figf.update_layout(showlegend=False)
     if f["nature_autres"]:
         st.caption(f"Nature des autres dechets : {f['nature_autres']}")
 
@@ -1033,7 +1145,7 @@ with onglets[5]:
                   range_x=[0, 100], text_auto=".0f",
                   title="Part des collectes pour lesquelles le champ est renseigne")
     figc.update_traces(marker_color=VERT)
-    st.plotly_chart(figc, width="stretch")
+    st.plotly_chart(styliser(figc), width="stretch")
     st.caption("Un taux faible signale un champ a rappeler aux agents lors du brief.")
 
     st.subheader("Levees mensuelles et certificats")
@@ -1094,7 +1206,7 @@ with onglets[6]:
                       labels={"tonnage": "kg", "responsable_sonaged": ""},
                       title="Tonnage collecte par responsable")
         figa.update_traces(marker_color=VERT)
-        st.plotly_chart(figa, width="stretch")
+        st.plotly_chart(styliser(figa), width="stretch")
 
     st.subheader("Contacts chez le client")
     contacts = dfa[dfa["contact_client"].astype(str).str.strip() != ""]
@@ -1149,3 +1261,9 @@ with onglets[7]:
     st.download_button("Telecharger les donnees (CSV)",
                        data=dfa.to_csv(index=False).encode("utf-8-sig"),
                        file_name=f"suivi_dechets_{date.today():%Y%m%d}.csv", mime="text/csv")
+
+# --------------------------------------------------------------------------- #
+st.markdown(
+    f"<div class='pied'>SONAGED · Suivi des dechets tries CAMUSAT · "
+    f"donnees issues de KoboToolbox · consulte le {date.today():%d/%m/%Y}</div>",
+    unsafe_allow_html=True)
