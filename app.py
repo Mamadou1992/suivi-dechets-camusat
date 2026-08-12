@@ -1,5 +1,5 @@
 """
-Suivi des dechets tries — CAMUSAT / SONAGED
+Suivi des dechets tries - CAMUSAT / SONAGED
 ============================================
 Tableau de bord Streamlit alimente par KoboToolbox.
 
@@ -369,7 +369,7 @@ def controle_acces() -> None:
         if LOGO:
             st.image(LOGO, width=170)
         st.title("Suivi des dechets tries")
-        st.caption("CAMUSAT / SONAGED — acces reserve aux equipes autorisees.")
+        st.caption("CAMUSAT / SONAGED - acces reserve aux equipes autorisees.")
 
         if not attendu:
             st.error(
@@ -388,7 +388,6 @@ def controle_acces() -> None:
                 st.session_state["acces_ok"] = True
                 st.rerun()
             st.error("Mot de passe incorrect.")
-        st.caption("Mot de passe oublie : contacter Mamadou DIOP (SONAGED).")
     st.stop()
 
 
@@ -464,22 +463,35 @@ if token and uid:
 if inclure_historique:
     blocs.append(charger_fichiers_locaux())
 
-df = pd.concat([b for b in blocs if not b.empty], ignore_index=True) if blocs else pd.DataFrame()
-if df.empty:
-    df = pd.DataFrame(columns=COLONNES)
+blocs_valides = [b for b in blocs if b is not None and not b.empty]
+if blocs_valides:
+    df = (pd.concat(blocs_valides, ignore_index=True)
+          .sort_values("date_collecte").reset_index(drop=True))
 else:
-    df = df.sort_values("date_collecte").reset_index(drop=True)
+    df = pd.DataFrame(columns=COLONNES)
 
 entete = st.columns([1, 9])
 if LOGO:
     entete[0].image(LOGO, width=80)
-entete[1].title("Suivi des dechets tries — CAMUSAT / SONAGED")
+entete[1].title("Suivi des dechets tries - CAMUSAT / SONAGED")
 
 if erreur_kobo:
     st.warning(f"Kobo : {erreur_kobo}")
 if df.empty:
-    st.info("Aucune donnee. Renseignez le token et l'UID du formulaire dans le menu de gauche, "
-            "ou deposez les fiches Excel dans le dossier `donnees/`.")
+    if token and uid and not erreur_kobo:
+        st.success("Connexion a KoboToolbox etablie.")
+        st.info(
+            "Le formulaire ne contient encore aucune soumission. Les indicateurs "
+            "apparaitront des la premiere collecte enregistree dans KoboCollect.\n\n"
+            "Verifier au passage que le formulaire selectionne est bien le bon "
+            "(menu de gauche) et qu'il est **deploye** dans Kobo."
+        )
+    else:
+        st.info(
+            "Aucune donnee disponible.\n\n"
+            "- Renseigner le token et l'UID du formulaire (menu de gauche ou secrets).\n"
+            "- Ou deposer les fiches de collecte Excel dans le dossier `donnees/`."
+        )
     st.stop()
 
 # --------------------------------------------------------------------------- #
@@ -608,7 +620,7 @@ with onglets[2]:
         cols = st.columns(max(len(dernier), 1))
         for col, (_, row) in zip(cols, dernier.iterrows()):
             depasse = row["stock"] >= seuil
-            col.metric(f"{row['site']} — stock actuel", f"{row['stock']:,.0f} kg".replace(",", " "),
+            col.metric(f"{row['site']} - stock actuel", f"{row['stock']:,.0f} kg".replace(",", " "),
                        delta="Levee a programmer" if depasse else "Sous le seuil",
                        delta_color="inverse" if depasse else "normal")
         if (dernier["stock"] >= seuil).any():
