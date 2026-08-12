@@ -105,8 +105,21 @@ COLONNES = [
     "bacs_autres", "poids_autres",
     "total_bacs", "total_poids", "poids_valorisable",
     "destination_dechets", "site_tampon_nom", "num_bon",
-    "levee_mensuelle", "num_certificat", "observations", "source",
+    "levee_mensuelle", "num_certificat", "observations",
+    "nature_autres", "fonction_responsable",
+    "latitude", "longitude", "photo_dechets", "photo_bon", "signature_client",
+    "date_saisie", "id_soumission", "source",
 ]
+
+# Champs du questionnaire suivis en completude documentaire
+CHAMPS_QUALITE = {
+    "num_bon": "Bon de pesee",
+    "photo_dechets": "Photo des dechets",
+    "photo_bon": "Photo du bon",
+    "signature_client": "Signature client",
+    "latitude": "Position GPS",
+    "observations": "Observations",
+}
 
 LIBELLES_DESTINATION = {
     "site_tampon": "Site tampon",
@@ -116,6 +129,29 @@ LIBELLES_DESTINATION = {
 }
 LIBELLES_CLIENT = {"camusat": "CAMUSAT", "miya": "MIYA", "autre": "Autre"}
 LIBELLES_SITE = {"thies": "Camusat Thies", "dakar": "Camusat Dakar", "autre": "Autre site"}
+
+
+def _index_attachments(valeur: Any) -> dict[str, str]:
+    """Associe le nom de fichier d'une piece jointe Kobo a son URL de telechargement."""
+    if not isinstance(valeur, list):
+        return {}
+    index = {}
+    for piece in valeur:
+        if not isinstance(piece, dict):
+            continue
+        url = piece.get("download_url") or piece.get("download_medium_url") or ""
+        for cle in ("filename", "media_file_basename", "question_xpath"):
+            nom = str(piece.get(cle, "")).split("/")[-1]
+            if nom:
+                index[nom] = url
+                index[nom.replace(" ", "_")] = url
+    return index
+
+
+def _url_media(index: dict[str, str], nom_fichier: str) -> str:
+    if not nom_fichier:
+        return ""
+    return index.get(nom_fichier, index.get(nom_fichier.replace(" ", "_"), ""))
 
 
 def _strip_group(col: str) -> str:
@@ -152,8 +188,27 @@ def normaliser_kobo(df_brut: pd.DataFrame) -> pd.DataFrame:
     out["site"] = out["site"].replace({"": "Non precise", "nan": "Non precise"})
 
     for champ in ["responsable_sonaged", "contact_client", "tel_contact",
-                  "site_tampon_nom", "num_bon", "num_certificat", "observations"]:
+                  "site_tampon_nom", "num_bon", "num_certificat", "observations",
+                  "nature_autres", "fonction_responsable"]:
         out[champ] = df.get(champ, pd.Series("", index=df.index)).astype(str).replace("nan", "")
+
+    # Position GPS : "latitude longitude altitude precision"
+    gps = df.get("gps", pd.Series("", index=df.index)).astype(str)
+    coords = gps.str.strip().str.split(r"\s+", expand=True) if len(gps) else pd.DataFrame()
+    out["latitude"] = (pd.to_numeric(coords[0], errors="coerce")
+                       if coords.shape[1] > 0 else np.nan)
+    out["longitude"] = (pd.to_numeric(coords[1], errors="coerce")
+                        if coords.shape[1] > 1 else np.nan)
+
+    # Pieces jointes : on associe chaque nom de fichier a son URL de telechargement
+    liens = df["_attachments"].apply(_index_attachments) if "_attachments" in df \
+        else pd.Series([{}] * len(df), index=df.index)
+    for champ in ["photo_dechets", "photo_bon", "signature_client"]:
+        noms = df.get(champ, pd.Series("", index=df.index)).astype(str).replace("nan", "")
+        out[champ] = [_url_media(lien, nom) for lien, nom in zip(liens, noms)]
+
+    out["date_saisie"] = pd.to_datetime(df.get("_submission_time"), errors="coerce")
+    out["id_soumission"] = df.get("_id", pd.Series("", index=df.index)).astype(str)
 
     for flux in ["plastiques", "cartons", "autres"]:
         out[f"bacs_{flux}"] = _num(df.get(f"bacs_{flux}", pd.Series(0, index=df.index)))
@@ -269,6 +324,10 @@ def _finaliser(df: pd.DataFrame) -> pd.DataFrame:
     for col in COLONNES:
         if col not in df:
             df[col] = ""
+    # les coordonnees doivent rester numeriques meme quand elles sont absentes
+    for col in ("latitude", "longitude"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["date_saisie"] = pd.to_datetime(df["date_saisie"], errors="coerce")
     return df[COLONNES].sort_values("date_collecte").reset_index(drop=True)
 
 
@@ -463,39 +522,77 @@ def charger_historique_reference() -> pd.DataFrame:
     return _finaliser(pd.DataFrame(lignes))
 
 
+def bloc_attente(titre: str, description: str, exemple: str = "") -> None:
+    """Encadre gris decrivant un champ du questionnaire pas encore renseigne."""
+    with st.container(border=True):
+        st.markdown(f"**{titre}** · en attente")
+        st.caption(description + (f"  \n_{exemple}_" if exemple else ""))
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def charger_media(url: str, token: str) -> bytes | None:
+    """Telecharge une piece jointe Kobo (necessite le token)."""
+    if not url:
+        return None
+    try:
+        r = requests.get(url, headers=_headers(token) if token else {}, timeout=30)
+        r.raise_for_status()
+        return r.content
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def taux_completude(donnees: pd.DataFrame, champ: str) -> float:
+    """Part des collectes pour lesquelles le champ est renseigne (en %)."""
+    if donnees.empty or champ not in donnees:
+        return 0.0
+    col = donnees[champ]
+    if col.dtype.kind in "fc":
+        rempli = col.notna()
+    else:
+        rempli = col.astype(str).str.strip().replace("nan", "").ne("")
+    return float(rempli.mean() * 100)
+
+
 cfg = get_config()
 
 with st.sidebar:
     if LOGO:
         st.image(LOGO, width=130)
-    st.header("Connexion KoboToolbox")
-    base_url = st.text_input("Serveur Kobo", value=cfg["base_url"])
-    token = st.text_input("Token API", value=cfg["token"], type="password",
-                          help="Compte Kobo > Parametres > Securite > Cle API")
-    uid = cfg["asset_uid"]
-    if token:
-        try:
-            assets = charger_assets(base_url, token)
-            options = {a["name"]: a["uid"] for a in assets}
-            if options:
-                defaut = next((n for n, u in options.items() if u == uid), list(options)[0])
-                choix = st.selectbox("Formulaire", list(options),
-                                     index=list(options).index(defaut))
-                uid = options[choix]
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Connexion impossible : {exc}")
-    uid = st.text_input("UID du formulaire", value=uid)
 
-    st.divider()
-    st.caption("Sources complementaires")
+    base_url, token, uid = cfg["base_url"], cfg["token"], cfg["asset_uid"]
+    connecte = bool(token and uid)
+    st.caption("Connecte a KoboToolbox" if connecte else "KoboToolbox non configure")
+
+    st.subheader("Sources de donnees")
     inclure_historique = st.checkbox("Fiches Excel du dossier donnees/", value=True)
     inclure_reference = st.checkbox(
         "Historique de reference (mars 2026)", value=True,
         help="Collectes de mars 2026 integrees a l'application. Permet de visualiser "
              "les indicateurs avant les premieres saisies Kobo.")
+
     if st.button("Actualiser les donnees", width="stretch"):
         st.cache_data.clear()
         st.rerun()
+
+    with st.expander("Parametres avances"):
+        st.caption("Valeurs issues des secrets. Une modification ici ne vaut que "
+                   "pour la session en cours.")
+        base_url = st.text_input("Serveur Kobo", value=base_url)
+        token = st.text_input("Token API", value=token, type="password",
+                              help="Compte Kobo > Parametres > Securite > Cle API")
+        if token:
+            try:
+                options = {a["name"]: a["uid"] for a in charger_assets(base_url, token)}
+                if options:
+                    noms = list(options)
+                    defaut = next((n for n, u in options.items() if u == uid), noms[0])
+                    uid = options[st.selectbox("Formulaire", noms,
+                                               index=noms.index(defaut))]
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Liste des formulaires indisponible : {exc}")
+        uid = st.text_input("UID du formulaire", value=uid)
+
     st.divider()
     if st.button("Se deconnecter", width="stretch"):
         st.session_state.clear()
@@ -640,7 +737,8 @@ with st.expander("Etat du dispositif", expanded=attente_kobo):
             "5. Reclamer le certificat de traitement apres chaque levee mensuelle.")
 
 onglets = st.tabs(["Vue d'ensemble", "Evolution", "Stock tampon",
-                   "Comparaison sites", "Donnees & export"])
+                   "Comparaison sites", "Fiches de collecte", "Tracabilite",
+                   "Intervenants", "Donnees & export"])
 
 # --------------------------------------------------------------------------- #
 with onglets[0]:
@@ -769,6 +867,213 @@ with onglets[3]:
 
 # --------------------------------------------------------------------------- #
 with onglets[4]:
+    st.caption("Detail de chaque passage, tel que saisi dans KoboCollect.")
+    fiches = dfa.sort_values("date_collecte", ascending=False)
+    etiquettes = [
+        f"{r.date_collecte:%d/%m/%Y} · {r.site} · {r.total_poids:.0f} kg"
+        for r in fiches.itertuples()]
+    choix = st.selectbox("Collecte", range(len(etiquettes)),
+                         format_func=lambda i: etiquettes[i])
+    f = fiches.iloc[choix]
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("**Identification**")
+        st.write(f"Date : {f['date_collecte']:%d/%m/%Y}")
+        st.write(f"Semaine : {f['semaine']} (ISO {f['semaine_iso']})")
+        st.write(f"Client / site : {f['client']} - {f['site']}")
+        st.caption(f"Source : {f['source']}"
+                   + (f" · soumission n°{f['id_soumission']}" if f["id_soumission"] else ""))
+    with c2:
+        st.markdown("**Interlocuteurs**")
+        st.write(f"Responsable SONAGED : {f['responsable_sonaged'] or 'non renseigne'}")
+        st.write(f"Fonction : {f['fonction_responsable'] or 'non renseignee'}")
+        st.write(f"Contact client : {f['contact_client'] or 'non renseigne'}")
+        st.write(f"Telephone : {f['tel_contact'] or 'non renseigne'}")
+    with c3:
+        st.markdown("**Destination**")
+        st.write(f"Destination : {f['destination_dechets']}")
+        st.write(f"Site tampon : {f['site_tampon_nom'] or 'non precise'}")
+        st.write(f"N° de bon : {f['num_bon'] or 'non renseigne'}")
+        st.write(f"Levee mensuelle : {'oui' if f['levee_mensuelle'] else 'non'}")
+        if f["levee_mensuelle"]:
+            st.write(f"N° de certificat : {f['num_certificat'] or 'non renseigne'}")
+
+    st.markdown("**Quantites**")
+    detail = pd.DataFrame({
+        "Flux": FLUX,
+        "Bacs": [f["bacs_plastiques"], f["bacs_cartons"], f["bacs_autres"]],
+        "Poids (kg)": [f["poids_plastiques"], f["poids_cartons"], f["poids_autres"]],
+    })
+    q1, q2 = st.columns([2, 3])
+    q1.dataframe(detail, hide_index=True, width="stretch")
+    figf = px.bar(detail, x="Flux", y="Poids (kg)", color="Flux",
+                  color_discrete_map=PALETTE, text_auto=".1f")
+    figf.update_layout(showlegend=False, height=260, margin=dict(t=10, b=10))
+    q2.plotly_chart(figf, width="stretch")
+    if f["nature_autres"]:
+        st.caption(f"Nature des autres dechets : {f['nature_autres']}")
+
+    st.markdown("**Preuves**")
+    p1, p2, p3 = st.columns(3)
+    for col, champ, titre, aide in (
+            (p1, "photo_dechets", "Photo des dechets",
+             "Prise lors du passage, elle atteste de la qualite du tri."),
+            (p2, "photo_bon", "Photo du bon de pesee",
+             "Justificatif du tonnage declare."),
+            (p3, "signature_client", "Signature du client",
+             "Validation du contact Camusat a la fin de la collecte.")):
+        with col:
+            url = str(f[champ]) if f[champ] else ""
+            contenu = charger_media(url, token) if url else None
+            if contenu:
+                st.image(contenu, caption=titre, width="stretch")
+            elif url:
+                with st.container(border=True):
+                    st.markdown(f"**{titre}** · indisponible")
+                    st.caption("La piece jointe existe dans Kobo mais n'a pas pu etre "
+                               "chargee. Verifier le token dans les secrets.")
+                    st.link_button("Ouvrir dans Kobo", url, width="stretch")
+            else:
+                bloc_attente(titre, aide)
+
+    g1, g2 = st.columns(2)
+    with g1:
+        if pd.notna(f["latitude"]) and pd.notna(f["longitude"]):
+            st.map(pd.DataFrame({"lat": [f["latitude"]], "lon": [f["longitude"]]}), zoom=13)
+            st.caption(f"Position : {f['latitude']:.5f}, {f['longitude']:.5f}")
+        else:
+            bloc_attente("Position GPS",
+                         "Relevee automatiquement par KoboCollect au moment de la saisie.",
+                         "Exemple : 14.79100, -16.92600")
+    with g2:
+        if str(f["observations"]).strip():
+            st.markdown("**Observations**")
+            st.info(f["observations"])
+        else:
+            bloc_attente("Observations",
+                         "Anomalies, refus de tri, incidents signales par l'agent.")
+
+
+# --------------------------------------------------------------------------- #
+with onglets[5]:
+    st.caption("Suivi documentaire : bons de pesee, levees mensuelles et certificats "
+               "de traitement delivres par le repreneur.")
+
+    t1, t2, t3, t4 = st.columns(4)
+    levees = dfa[dfa["levee_mensuelle"].astype(bool)]
+    sans_certificat = int((levees["num_certificat"].astype(str).str.strip() == "").sum())
+    t1.metric("Collectes tracees", f"{taux_completude(dfa, 'num_bon'):.0f} %",
+              help="Part des collectes avec un numero de bon de pesee")
+    t2.metric("Levees mensuelles", len(levees))
+    t3.metric("Certificats obtenus", len(levees) - sans_certificat)
+    t4.metric("Certificats manquants", sans_certificat,
+              delta="a reclamer" if sans_certificat else "a jour",
+              delta_color="inverse" if sans_certificat else "normal")
+
+    st.subheader("Completude de la saisie")
+    completude = pd.DataFrame({
+        "Champ": list(CHAMPS_QUALITE.values()),
+        "Taux (%)": [round(taux_completude(dfa, c), 1) for c in CHAMPS_QUALITE],
+    }).sort_values("Taux (%)")
+    figc = px.bar(completude, x="Taux (%)", y="Champ", orientation="h",
+                  range_x=[0, 100], text_auto=".0f",
+                  title="Part des collectes pour lesquelles le champ est renseigne")
+    figc.update_traces(marker_color=VERT)
+    st.plotly_chart(figc, width="stretch")
+    st.caption("Un taux faible signale un champ a rappeler aux agents lors du brief.")
+
+    st.subheader("Levees mensuelles et certificats")
+    if levees.empty:
+        bloc_attente(
+            "Levees vers Ciments du Sahel",
+            "Ce tableau se remplira des qu'une collecte sera declaree comme levee "
+            "mensuelle dans le formulaire, avec son numero de certificat.",
+            "Colonnes attendues : date, site, quantite, n° de bon, n° de certificat")
+    else:
+        vue = levees[["date_collecte", "site", "poids_valorisable",
+                      "destination_dechets", "num_bon", "num_certificat"]].rename(
+            columns={"date_collecte": "Date", "site": "Site",
+                     "poids_valorisable": "Quantite (kg)",
+                     "destination_dechets": "Destination",
+                     "num_bon": "N. bon", "num_certificat": "N. certificat"})
+        st.dataframe(vue, width="stretch", hide_index=True)
+
+    st.subheader("Collectes sans bon de pesee")
+    sans_bon = dfa[dfa["num_bon"].astype(str).str.strip() == ""]
+    if sans_bon.empty:
+        st.success("Toutes les collectes de la periode disposent d'un bon de pesee.")
+    else:
+        st.warning(f"{len(sans_bon)} collecte(s) sans numero de bon.")
+        st.dataframe(
+            sans_bon[["date_collecte", "site", "total_poids", "responsable_sonaged"]].rename(
+                columns={"date_collecte": "Date", "site": "Site",
+                         "total_poids": "Poids (kg)",
+                         "responsable_sonaged": "Responsable"}),
+            width="stretch", hide_index=True)
+
+
+# --------------------------------------------------------------------------- #
+with onglets[6]:
+    st.caption("Referents de la collecte cote SONAGED et cote client.")
+
+    agents = dfa[dfa["responsable_sonaged"].astype(str).str.strip() != ""]
+    if agents.empty:
+        bloc_attente(
+            "Responsables SONAGED",
+            "Le champ 'Responsable SONAGED' du formulaire alimente ce tableau : "
+            "nombre de collectes, tonnage et regularite par agent.",
+            "Point 1 de la note : designer un referent pour la collecte et le suivi")
+    else:
+        recap = agents.groupby("responsable_sonaged", as_index=False).agg(
+            collectes=("total_poids", "size"), tonnage=("total_poids", "sum"),
+            derniere=("date_collecte", "max"), premiere=("date_collecte", "min"))
+        recap["tonnage"] = recap["tonnage"].round(1)
+        recap["derniere"] = recap["derniere"].dt.strftime("%d/%m/%Y")
+        recap["premiere"] = recap["premiere"].dt.strftime("%d/%m/%Y")
+        st.dataframe(recap.rename(columns={
+            "responsable_sonaged": "Responsable SONAGED", "collectes": "Collectes",
+            "tonnage": "Tonnage (kg)", "premiere": "Premiere collecte",
+            "derniere": "Derniere collecte"}), width="stretch", hide_index=True)
+
+        figa = px.bar(recap.sort_values("tonnage"), x="tonnage", y="responsable_sonaged",
+                      orientation="h", text_auto=".0f",
+                      labels={"tonnage": "kg", "responsable_sonaged": ""},
+                      title="Tonnage collecte par responsable")
+        figa.update_traces(marker_color=VERT)
+        st.plotly_chart(figa, width="stretch")
+
+    st.subheader("Contacts chez le client")
+    contacts = dfa[dfa["contact_client"].astype(str).str.strip() != ""]
+    if contacts.empty:
+        bloc_attente("Contacts Camusat",
+                     "Nom et telephone du contact present lors de chaque passage.")
+    else:
+        vue = (contacts.groupby(["site", "contact_client"], as_index=False)
+               .agg(telephone=("tel_contact", "last"),
+                    collectes=("total_poids", "size"),
+                    derniere=("date_collecte", "max")))
+        vue["derniere"] = vue["derniere"].dt.strftime("%d/%m/%Y")
+        st.dataframe(vue.rename(columns={
+            "site": "Site", "contact_client": "Contact", "telephone": "Telephone",
+            "collectes": "Collectes", "derniere": "Dernier passage"}),
+            width="stretch", hide_index=True)
+
+    st.subheader("Regularite des passages")
+    jours = dfa.sort_values("date_collecte")["date_collecte"].diff().dt.days.dropna()
+    if len(jours) < 2:
+        bloc_attente("Intervalle entre passages",
+                     "Calcule automatiquement des que trois collectes au moins "
+                     "auront ete enregistrees.")
+    else:
+        r1, r2, r3 = st.columns(3)
+        r1.metric("Intervalle moyen", f"{jours.mean():.0f} j")
+        r2.metric("Intervalle le plus court", f"{jours.min():.0f} j")
+        r3.metric("Intervalle le plus long", f"{jours.max():.0f} j")
+
+
+# --------------------------------------------------------------------------- #
+with onglets[7]:
     st.subheader("Donnees detaillees")
     st.dataframe(dfa, width="stretch", hide_index=True)
 
