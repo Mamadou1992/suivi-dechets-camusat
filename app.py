@@ -1,17 +1,321 @@
-"""Suivi des dechets tries CAMUSAT / SONAGED - tableau de bord Streamlit."""
+"""
+Suivi des dechets tries — CAMUSAT / SONAGED
+============================================
+Tableau de bord Streamlit alimente par KoboToolbox.
+
+Fichier unique organise en 5 sections :
+  1. Configuration et connexion KoboToolbox
+  2. Normalisation des donnees (Kobo + fiches Excel historiques)
+  3. Indicateurs et agregations
+  4. Controle d'acces
+  5. Interface Streamlit
+
+Lancement :  streamlit run app.py
+Documentation : README.md et DEPLOIEMENT.md
+"""
 from __future__ import annotations
 
 import io
 import os
+import re
+import unicodedata
 from datetime import date
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 
-import data_utils as du
-from kobo_client import KoboError, fetch_submissions, get_config, list_assets
+# =========================================================================== #
+# 1. Connexion KoboToolbox
+# =========================================================================== #
+
+DEFAULT_BASE_URL = "https://kf.kobotoolbox.org"
+TIMEOUT = 60
+
+
+class KoboError(RuntimeError):
+    pass
+
+
+def _headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Token {token}", "Accept": "application/json"}
+
+
+def get_config() -> dict[str, str]:
+    """Lit la configuration depuis st.secrets puis les variables d'environnement."""
+    cfg = {"base_url": DEFAULT_BASE_URL, "token": "", "asset_uid": ""}
+    try:
+        import streamlit as st
+
+        for key in cfg:
+            if key in st.secrets:
+                cfg[key] = str(st.secrets[key])
+    except Exception:
+        pass
+    for key in cfg:
+        env = os.getenv("KOBO_" + key.upper())
+        if env:
+            cfg[key] = env
+    cfg["base_url"] = cfg["base_url"].rstrip("/")
+    return cfg
+
+
+def list_assets(base_url: str, token: str) -> list[dict[str, Any]]:
+    url = f"{base_url}/api/v2/assets.json?limit=200"
+    r = requests.get(url, headers=_headers(token), timeout=TIMEOUT)
+    if r.status_code == 401:
+        raise KoboError("Token invalide ou expire (401).")
+    r.raise_for_status()
+    return [a for a in r.json().get("results", []) if a.get("asset_type") == "survey"]
+
+
+def fetch_submissions(base_url: str, token: str, asset_uid: str) -> pd.DataFrame:
+    """Recupere toutes les soumissions du formulaire (pagination incluse)."""
+    rows: list[dict[str, Any]] = []
+    url = f"{base_url}/api/v2/assets/{asset_uid}/data.json?limit=1000"
+    while url:
+        r = requests.get(url, headers=_headers(token), timeout=TIMEOUT)
+        if r.status_code == 401:
+            raise KoboError("Token invalide ou expire (401).")
+        if r.status_code == 404:
+            raise KoboError(f"Formulaire introuvable : {asset_uid}")
+        r.raise_for_status()
+        payload = r.json()
+        rows.extend(payload.get("results", []))
+        url = payload.get("next")
+    return pd.DataFrame(rows)
+
+# =========================================================================== #
+# 2 & 3. Normalisation, indicateurs et agregations
+# =========================================================================== #
+
+FLUX = ["Plastiques", "Cartons", "Autres"]
+VALORISABLES = ["Plastiques", "Cartons"]
+
+# Schema cible commun a toutes les sources
+COLONNES = [
+    "date_collecte", "mois", "semaine", "semaine_iso", "client", "site",
+    "responsable_sonaged", "contact_client", "tel_contact",
+    "bacs_plastiques", "poids_plastiques",
+    "bacs_cartons", "poids_cartons",
+    "bacs_autres", "poids_autres",
+    "total_bacs", "total_poids", "poids_valorisable",
+    "destination_dechets", "site_tampon_nom", "num_bon",
+    "levee_mensuelle", "num_certificat", "observations", "source",
+]
+
+LIBELLES_DESTINATION = {
+    "site_tampon": "Site tampon",
+    "ciments_sahel": "Ciments du Sahel",
+    "decharge": "Decharge",
+    "autre": "Autre",
+}
+LIBELLES_CLIENT = {"camusat": "CAMUSAT", "miya": "MIYA", "autre": "Autre"}
+LIBELLES_SITE = {"thies": "Camusat Thies", "dakar": "Camusat Dakar", "autre": "Autre site"}
+
+
+def _strip_group(col: str) -> str:
+    """'quantites/g_plastiques/poids_plastiques' -> 'poids_plastiques'."""
+    return col.split("/")[-1]
+
+
+def _num(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").fillna(0.0)
+
+
+def normaliser_kobo(df_brut: pd.DataFrame) -> pd.DataFrame:
+    """Transforme les soumissions Kobo brutes en table analytique."""
+    if df_brut is None or df_brut.empty:
+        return pd.DataFrame(columns=COLONNES)
+
+    df = df_brut.copy()
+    df.columns = [_strip_group(c) for c in df.columns]
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    out = pd.DataFrame(index=df.index)
+    out["date_collecte"] = pd.to_datetime(df.get("date_collecte"), errors="coerce")
+    if out["date_collecte"].isna().all() and "_submission_time" in df:
+        out["date_collecte"] = pd.to_datetime(df["_submission_time"], errors="coerce")
+
+    client = df.get("client", pd.Series("camusat", index=df.index)).astype(str)
+    out["client"] = client.map(LIBELLES_CLIENT).fillna(client).replace(
+        {"": "CAMUSAT", "nan": "CAMUSAT"})
+
+    site = df.get("site", pd.Series("", index=df.index)).astype(str)
+    site_autre = df.get("site_autre", pd.Series("", index=df.index)).astype(str)
+    out["site"] = np.where(site_autre.ne("") & site_autre.ne("nan"),
+                           site_autre, site.map(LIBELLES_SITE).fillna(site))
+    out["site"] = out["site"].replace({"": "Non precise", "nan": "Non precise"})
+
+    for champ in ["responsable_sonaged", "contact_client", "tel_contact",
+                  "site_tampon_nom", "num_bon", "num_certificat", "observations"]:
+        out[champ] = df.get(champ, pd.Series("", index=df.index)).astype(str).replace("nan", "")
+
+    for flux in ["plastiques", "cartons", "autres"]:
+        out[f"bacs_{flux}"] = _num(df.get(f"bacs_{flux}", pd.Series(0, index=df.index)))
+        out[f"poids_{flux}"] = _num(df.get(f"poids_{flux}", pd.Series(0, index=df.index)))
+
+    dest = df.get("destination_dechets", pd.Series("", index=df.index)).astype(str)
+    out["destination_dechets"] = dest.map(LIBELLES_DESTINATION).fillna(dest).replace(
+        {"": "Non precise", "nan": "Non precise"})
+    levee = df.get("levee_mensuelle", pd.Series("non", index=df.index)).astype(str)
+    out["levee_mensuelle"] = levee.str.lower().eq("oui")
+    out["source"] = "Kobo"
+    return _finaliser(out)
+
+
+def normaliser_fiche_excel(chemin) -> pd.DataFrame:
+    """Lit une 'Fiche de collecte' historique (un onglet par semaine)."""
+    feuilles = pd.read_excel(chemin, sheet_name=None, header=None)
+    lignes = []
+    for nom_feuille, ws in feuilles.items():
+        info: dict[str, object] = {"semaine": nom_feuille.strip().capitalize()}
+        poids = {"Plastiques": 0.0, "Cartons": 0.0, "Autres": 0.0}
+        bacs = {"Plastiques": 0, "Cartons": 0, "Autres": 0}
+        for _, row in ws.iterrows():
+            cells = [c for c in row.tolist()]
+            texte = [str(c).strip() if pd.notna(c) else "" for c in cells]
+            cle = _sans_accents(texte[0]).lower() if texte else ""
+            if cle.startswith("date"):
+                info["date_collecte"] = _parse_date(cells[1] if len(cells) > 1 else None)
+                info["contact_client"] = _premier_texte(texte[3:])
+            elif cle.startswith("lieu"):
+                info["site"] = _premier_texte(texte[1:2]) or "CAMUSAT"
+            elif cle.startswith("responsable"):
+                info["responsable_sonaged"] = _premier_texte(texte[1:2])
+            elif cle in ("plastiques", "cartons", "autres"):
+                libelle = cle.capitalize()
+                nums = [c for c in cells[1:] if isinstance(c, (int, float)) and pd.notna(c)]
+                if nums:
+                    bacs[libelle] = nums[0]
+                    poids[libelle] = nums[1] if len(nums) > 1 else 0.0
+        if sum(poids.values()) == 0:
+            continue
+        ligne = {
+            "date_collecte": info.get("date_collecte"),
+            "semaine": info.get("semaine", ""),
+            "client": "CAMUSAT",
+            "site": str(info.get("site", "CAMUSAT")),
+            "responsable_sonaged": str(info.get("responsable_sonaged", "")),
+            "contact_client": str(info.get("contact_client", "")),
+            "tel_contact": "", "site_tampon_nom": "", "num_bon": "",
+            "num_certificat": "", "observations": "",
+            "destination_dechets": "Non precise", "levee_mensuelle": False,
+            "source": "Historique Excel",
+        }
+        for libelle, champ in zip(FLUX, ["plastiques", "cartons", "autres"]):
+            ligne[f"bacs_{champ}"] = bacs[libelle]
+            ligne[f"poids_{champ}"] = poids[libelle]
+        lignes.append(ligne)
+    return _finaliser(pd.DataFrame(lignes))
+
+
+def derive_semaine(dates: pd.Series) -> pd.Series:
+    """Semaine du mois deduite de la date : jours 1-7 -> Semaine 1, 8-14 -> Semaine 2, etc."""
+    d = pd.to_datetime(dates, errors="coerce")
+    num = ((d.dt.day - 1) // 7 + 1).clip(upper=5)
+    return num.apply(lambda n: f"Semaine {int(n)}" if pd.notna(n) else "")
+
+
+def _sans_accents(txt: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", txt) if unicodedata.category(c) != "Mn")
+
+
+def _premier_texte(valeurs) -> str:
+    for v in valeurs:
+        if v and v not in ("nan", "None") and not re.fullmatch(r"[\d\s.]+", v):
+            return v
+    return ""
+
+
+def _parse_date(val):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return pd.NaT
+    if isinstance(val, (int, float)):  # serial Excel
+        return pd.Timestamp("1899-12-30") + pd.Timedelta(days=int(val))
+    return pd.to_datetime(val, errors="coerce", dayfirst=True)
+
+
+def _finaliser(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=COLONNES)
+    df = df.copy()
+    df["date_collecte"] = pd.to_datetime(df["date_collecte"], errors="coerce")
+    df["total_bacs"] = df[["bacs_plastiques", "bacs_cartons", "bacs_autres"]].sum(axis=1)
+    df["total_poids"] = df[["poids_plastiques", "poids_cartons", "poids_autres"]].sum(axis=1)
+    df["poids_valorisable"] = df[["poids_plastiques", "poids_cartons"]].sum(axis=1)
+    df["mois"] = df["date_collecte"].dt.to_period("M").astype(str)
+    semaine_calc = derive_semaine(df["date_collecte"])
+    if "semaine" in df:
+        vide = df["semaine"].astype(str).str.strip().isin(["", "nan", "None"])
+        df["semaine"] = np.where(vide, semaine_calc, df["semaine"])
+    else:
+        df["semaine"] = semaine_calc
+    df["semaine_iso"] = df["date_collecte"].dt.isocalendar().week.astype("Int64")
+    for col in COLONNES:
+        if col not in df:
+            df[col] = ""
+    return df[COLONNES].sort_values("date_collecte").reset_index(drop=True)
+
+
+def format_long(df: pd.DataFrame) -> pd.DataFrame:
+    """Passe en format long (une ligne par flux) pour les graphiques."""
+    if df.empty:
+        return pd.DataFrame(columns=["date_collecte", "mois", "site", "flux", "poids", "bacs"])
+    morceaux = []
+    for libelle, champ in zip(FLUX, ["plastiques", "cartons", "autres"]):
+        bloc = df[["date_collecte", "mois", "semaine", "site", "client"]].copy()
+        bloc["flux"] = libelle
+        bloc["poids"] = df[f"poids_{champ}"].values
+        bloc["bacs"] = df[f"bacs_{champ}"].values
+        morceaux.append(bloc)
+    return pd.concat(morceaux, ignore_index=True)
+
+
+def calculer_stock_tampon(df: pd.DataFrame) -> pd.DataFrame:
+    """Entrees (vers site tampon) - sorties (levees) par site, cumulees dans le temps."""
+    if df.empty:
+        return pd.DataFrame(columns=["date_collecte", "site", "entrees", "sorties", "stock"])
+    d = df.copy()
+    d["entrees"] = np.where(d["destination_dechets"].eq("Site tampon"), d["poids_valorisable"], 0.0)
+    d["sorties"] = np.where(d["levee_mensuelle"].astype(bool), d["poids_valorisable"], 0.0)
+    if (d["entrees"].sum() + d["sorties"].sum()) == 0:
+        return pd.DataFrame(columns=["date_collecte", "site", "entrees", "sorties", "stock"])
+    agg = (d.groupby(["site", "date_collecte"], as_index=False)[["entrees", "sorties"]].sum()
+             .sort_values(["site", "date_collecte"]))
+    agg["mouvement"] = agg["entrees"] - agg["sorties"]
+    agg["stock"] = agg.groupby("site")["mouvement"].cumsum()
+    return agg.drop(columns="mouvement")
+
+
+def kpis(df: pd.DataFrame) -> dict[str, float]:
+    if df.empty:
+        return {"total": 0.0, "valorisable": 0.0, "taux": 0.0, "bacs": 0.0, "collectes": 0}
+    total = float(df["total_poids"].sum())
+    valo = float(df["poids_valorisable"].sum())
+    return {
+        "total": total,
+        "valorisable": valo,
+        "taux": (valo / total * 100) if total else 0.0,
+        "bacs": float(df["total_bacs"].sum()),
+        "collectes": int(len(df)),
+    }
+
+
+def evolution_mensuelle(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["mois", "total_poids", "poids_valorisable", "taux"])
+    g = df.groupby("mois", as_index=False)[["total_poids", "poids_valorisable", "total_bacs"]].sum()
+    g["taux"] = np.where(g["total_poids"] > 0, g["poids_valorisable"] / g["total_poids"] * 100, 0)
+    return g.sort_values("mois")
+
+# =========================================================================== #
+# 4 & 5. Controle d'acces et interface Streamlit
+# =========================================================================== #
 
 RACINE = Path(__file__).parent
 DOSSIER_DONNEES = RACINE / "donnees"
@@ -96,7 +400,7 @@ controle_acces()
 # --------------------------------------------------------------------------- #
 @st.cache_data(ttl=600, show_spinner="Recuperation des donnees Kobo...")
 def charger_kobo(base_url: str, token: str, uid: str) -> pd.DataFrame:
-    return du.normaliser_kobo(fetch_submissions(base_url, token, uid))
+    return normaliser_kobo(fetch_submissions(base_url, token, uid))
 
 
 @st.cache_data(ttl=600)
@@ -108,14 +412,14 @@ def charger_assets(base_url: str, token: str) -> list[dict]:
 def charger_fichiers_locaux() -> pd.DataFrame:
     """Reprend les fiches Excel historiques placees dans ./donnees."""
     if not DOSSIER_DONNEES.exists():
-        return pd.DataFrame(columns=du.COLONNES)
+        return pd.DataFrame(columns=COLONNES)
     blocs = []
     for f in sorted(DOSSIER_DONNEES.glob("*.xlsx")):
         try:
-            blocs.append(du.normaliser_fiche_excel(f))
+            blocs.append(normaliser_fiche_excel(f))
         except Exception as exc:  # noqa: BLE001
             st.warning(f"Fichier ignore ({f.name}) : {exc}")
-    return pd.concat(blocs, ignore_index=True) if blocs else pd.DataFrame(columns=du.COLONNES)
+    return pd.concat(blocs, ignore_index=True) if blocs else pd.DataFrame(columns=COLONNES)
 
 
 cfg = get_config()
@@ -162,7 +466,7 @@ if inclure_historique:
 
 df = pd.concat([b for b in blocs if not b.empty], ignore_index=True) if blocs else pd.DataFrame()
 if df.empty:
-    df = pd.DataFrame(columns=du.COLONNES)
+    df = pd.DataFrame(columns=COLONNES)
 else:
     df = df.sort_values("date_collecte").reset_index(drop=True)
 
@@ -197,7 +501,7 @@ else:
     clients = tous_clients
     reste = colonnes[1:]
 sites = reste[0].multiselect("Site", tous_sites, default=tous_sites)
-flux_sel = reste[1].multiselect("Flux", du.FLUX, default=du.FLUX)
+flux_sel = reste[1].multiselect("Flux", FLUX, default=FLUX)
 
 semaines = st.multiselect("Semaine du mois (deduite de la date de collecte)",
                           toutes_semaines, default=toutes_semaines)
@@ -211,13 +515,13 @@ if dfa.empty:
     st.warning("Aucune collecte sur ce perimetre.")
     st.stop()
 
-long = du.format_long(dfa)
+long = format_long(dfa)
 long = long[long["flux"].isin(flux_sel)]
 
 # --------------------------------------------------------------------------- #
 # KPI
 # --------------------------------------------------------------------------- #
-k = du.kpis(dfa)
+k = kpis(dfa)
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Tonnage total", f"{k['total']/1000:,.2f} t".replace(",", " "))
 m2.metric("Valorisable (plastiques + cartons)", f"{k['valorisable']/1000:,.2f} t".replace(",", " "))
@@ -253,7 +557,7 @@ with onglets[0]:
 
 # --------------------------------------------------------------------------- #
 with onglets[1]:
-    evo = du.evolution_mensuelle(dfa)
+    evo = evolution_mensuelle(dfa)
     e1, e2 = st.columns([3, 2])
     mensuel = long.groupby(["mois", "flux"], as_index=False)["poids"].sum()
     fige = px.bar(mensuel, x="mois", y="poids", color="flux", barmode="group",
@@ -289,7 +593,7 @@ with onglets[2]:
                "diminue des quantites evacuees lors des levees mensuelles.")
     seuil = st.number_input("Seuil d'alerte de remplissage (kg)", min_value=100,
                             max_value=50000, value=1500, step=100)
-    stock = du.calculer_stock_tampon(dfa)
+    stock = calculer_stock_tampon(dfa)
     if stock.empty:
         st.info("Aucun mouvement vers un site tampon sur la periode.")
     else:
@@ -362,11 +666,11 @@ with onglets[4]:
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             donnees.to_excel(writer, sheet_name="Collectes", index=False)
-            du.evolution_mensuelle(donnees).to_excel(writer, sheet_name="Synthese mensuelle",
+            evolution_mensuelle(donnees).to_excel(writer, sheet_name="Synthese mensuelle",
                                                      index=False)
-            (du.format_long(donnees).groupby(["mois", "flux"], as_index=False)["poids"].sum()
+            (format_long(donnees).groupby(["mois", "flux"], as_index=False)["poids"].sum()
              .to_excel(writer, sheet_name="Par flux", index=False))
-            st_tampon = du.calculer_stock_tampon(donnees)
+            st_tampon = calculer_stock_tampon(donnees)
             if not st_tampon.empty:
                 st_tampon.to_excel(writer, sheet_name="Stock tampon", index=False)
         return buffer.getvalue()
