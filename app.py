@@ -727,15 +727,6 @@ with st.expander("Etat du dispositif", expanded=attente_kobo):
         f"au {derniere:%d/%m/%Y} · "
         f"Fin de mois de la derniere collecte : {prochaine_levee:%d/%m/%Y}")
 
-    if attente_kobo:
-        st.markdown(
-            "**Points a lever pour passer en suivi reel :**\n"
-            "1. Designer le referent collecte cote Camusat et cote SONAGED.\n"
-            "2. Deployer le formulaire Kobo et installer KoboCollect sur les telephones.\n"
-            "3. Arreter le site tampon de stockage et son seuil de remplissage.\n"
-            "4. Faire renseigner le n° de bon de pesee a chaque passage.\n"
-            "5. Reclamer le certificat de traitement apres chaque levee mensuelle.")
-
 onglets = st.tabs(["Vue d'ensemble", "Evolution", "Stock tampon",
                    "Comparaison sites", "Fiches de collecte", "Tracabilite",
                    "Intervenants", "Donnees & export"])
